@@ -318,16 +318,26 @@ def _fetch_direct_http(last_n_games: int) -> pd.DataFrame:
     for attempt in range(3):
         try:
             if attempt > 0:
-                time.sleep(RATE_LIMIT_DELAY * attempt)  # 0s, 0.6s, 1.2s
+                time.sleep(RATE_LIMIT_DELAY * attempt)
             resp = requests.get(
                 "https://stats.nba.com/stats/leaguedashplayerstats",
                 params=base_params, headers=NBA_DIRECT_HEADERS, timeout=30,
             )
+            logger.info(f"NBA Stats HTTP {resp.status_code} | URL: {resp.url[:120]}")
             resp.raise_for_status()
             headers_list, rows = _parse_nba_json(resp.json())
             if not rows:
+                logger.warning(f"NBA Stats returned 0 rows (attempt {attempt+1})")
                 continue
             df = pd.DataFrame(rows, columns=headers_list)
+            # Log first row to diagnose totals vs per-game
+            if not df.empty:
+                r = df.iloc[0]
+                logger.info(
+                    f"NBA Stats sample row — {r.get('PLAYER_NAME','?')}: "
+                    f"PTS={r.get('PTS','?')} GP={r.get('GP','?')} "
+                    f"PerMode param was: {base_params['PerMode']}"
+                )
 
             # Try advanced stats
             try:
@@ -515,6 +525,25 @@ def _parse_nba_json(data: dict):
 
 
 def _build_player_map(df: pd.DataFrame, window: str) -> Dict[str, "PlayerStats"]:
+    """
+    Build player map from a stats DataFrame.
+
+    Handles both per-game and season-total responses from the NBA API.
+    Detection: if average PTS > 50, the API returned totals — divide by GP.
+    (No NBA player averages 50+ PPG; Wilt's record is 50.4 for a full season)
+    """
+    if df.empty:
+        return {}
+
+    # Sample first 10 players to detect if these are totals or per-game
+    sample_pts = df["PTS"].dropna().head(20)
+    is_totals  = sample_pts.mean() > 50  # clearly totals if avg > 50 across sample
+    if is_totals:
+        logger.warning(
+            f"NBA API returned season TOTALS (avg PTS={sample_pts.mean():.1f}) "
+            f"despite PerMode=PerGame — dividing by GP automatically"
+        )
+
     player_map = {}
     for _, row in df.iterrows():
         raw = str(row.get("PLAYER_NAME", "")).strip()
@@ -523,34 +552,60 @@ def _build_player_map(df: pd.DataFrame, window: str) -> Dict[str, "PlayerStats"]
         name = normalize_player_name(raw)
         if not name:
             continue
+
+        gp  = max(int(_sf(row.get("GP", 1))), 1)  # avoid div-by-zero
         usg = _sf(row.get("USG_PCT", 0))
         per = _sf(row.get("PIE", 0))
-        pts = _sf(row.get("PTS", 0))
-        fga = _sf(row.get("FGA", 0))
-        fta = _sf(row.get("FTA", 0))
-        ts  = pts / (2 * (fga + 0.44 * fta)) if (fga + fta) > 0 else 0.0
+
+        # Convert totals → per-game if needed
+        def pg(col: str) -> float:
+            v = _sf(row.get(col, 0))
+            return v / gp if is_totals else v
+
+        pts = pg("PTS")
+        fga = pg("FGA")
+        fta = pg("FTA")
+
+        # True Shooting % — computed from per-game values
+        ts = pts / (2 * (fga + 0.44 * fta)) if (fga + fta) > 0 else 0.0
+
+        # Percentages (FG%, 3P%, FT%) are NOT totals — never divide
+        fg_pct  = _sf(row.get("FG_PCT",  0))
+        fg3_pct = _sf(row.get("FG3_PCT", 0))
+        ft_pct  = _sf(row.get("FT_PCT",  0))
 
         player_map[name] = PlayerStats(
             player_id=int(_sf(row.get("PLAYER_ID", 0))),
             player_name=name,
             team_abbrev=str(row.get("TEAM_ABBREVIATION", "")),
             team_id=int(_sf(row.get("TEAM_ID", 0))),
-            games_played=int(_sf(row.get("GP", 0))),
-            minutes_per_game=_sf(row.get("MIN")),
-            points_per_game=_sf(row.get("PTS")),
-            rebounds_per_game=_sf(row.get("REB")),
-            assists_per_game=_sf(row.get("AST")),
-            steals_per_game=_sf(row.get("STL")),
-            blocks_per_game=_sf(row.get("BLK")),
-            fg_percentage=_sf(row.get("FG_PCT")),
-            three_pt_percentage=_sf(row.get("FG3_PCT")),
-            ft_percentage=_sf(row.get("FT_PCT")),
-            plus_minus=_sf(row.get("PLUS_MINUS", 0)),
+            games_played=gp,
+            minutes_per_game=pg("MIN"),
+            points_per_game=pts,
+            rebounds_per_game=pg("REB"),
+            assists_per_game=pg("AST"),
+            steals_per_game=pg("STL"),
+            blocks_per_game=pg("BLK"),
+            fg_percentage=fg_pct,
+            three_pt_percentage=fg3_pct,
+            ft_percentage=ft_pct,
+            plus_minus=pg("PLUS_MINUS"),
+            # USG% and PIE: API returns 0–1 or 0–100 depending on version
             usage_rate=usg if usg > 1.0 else usg * 100,
             player_efficiency_rating=per if per > 1.0 else per * 100,
             true_shooting_pct=ts,
             stats_window=window,
         )
+
+    # Log a sample so you can verify values look right
+    sample = list(player_map.values())[:3]
+    for ps in sample:
+        logger.info(
+            f"  {ps.player_name}: {ps.points_per_game:.1f} PPG / "
+            f"{ps.rebounds_per_game:.1f} RPG / {ps.assists_per_game:.1f} APG "
+            f"in {ps.games_played} GP"
+        )
+
     logger.info(f"Player map: {len(player_map)} players ({window})")
     return player_map
 
