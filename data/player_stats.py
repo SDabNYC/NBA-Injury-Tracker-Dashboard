@@ -215,20 +215,24 @@ def lookup_player(name: str, player_map: Dict[str, "PlayerStats"]) -> Optional["
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _fetch_stats_window(last_n: int, label: str) -> Dict[str, "PlayerStats"]:
-    """Fetch one stats window via direct HTTP. Falls back to ESPN if needed."""
+    """
+    Fetch one stats window via direct HTTP to stats.nba.com.
+    Falls back to ESPN stats API if NBA API is blocked/throttled.
+    """
     df = _fetch_direct_http(last_n)
     if not df.empty:
         logger.info(f"Direct HTTP succeeded for '{label}': {len(df)} rows")
         return _build_player_map(df, label)
 
-    # ESPN fallback (full season only — no rolling window support)
-    if last_n == 0:
-        logger.warning(f"Direct HTTP failed for '{label}' — trying ESPN fallback...")
-        df = _fetch_espn_stats()
-        if not df.empty:
-            return _build_player_map(df, f"{label} (ESPN)")
+    # NBA API failed — use ESPN as fallback for all windows
+    # ESPN only has full-season stats, so last-N overlay will use season averages
+    logger.warning(f"Direct HTTP failed for '{label}' — trying ESPN fallback...")
+    df = _fetch_espn_stats()
+    if not df.empty:
+        logger.info(f"ESPN fallback succeeded for '{label}': {len(df)} rows")
+        return _build_player_map(df, f"{label} (ESPN)")
 
-    logger.warning(f"All sources failed for window '{label}'")
+    logger.error(f"ALL sources failed for window '{label}'")
     return {}
 
 
@@ -289,8 +293,9 @@ def _fetch_direct_http(last_n_games: int) -> pd.DataFrame:
             return df
 
         except Exception as e:
-            logger.warning(f"Direct HTTP attempt {attempt+1}: {e}")
+            logger.warning(f"Direct HTTP attempt {attempt+1} failed: {type(e).__name__}: {e}")
 
+    logger.error("Direct HTTP failed after 3 attempts — stats.nba.com may be blocking requests")
     return pd.DataFrame()
 
 
