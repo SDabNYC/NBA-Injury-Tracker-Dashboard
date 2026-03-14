@@ -429,8 +429,9 @@ def _df_to_team_totals(df: pd.DataFrame) -> Dict[str, "TeamTotals"]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _fetch_espn_stats() -> pd.DataFrame:
-    season_end_year = int(CURRENT_SEASON.split("-")[0]) + 1
-    logger.info(f"ESPN stats fallback (season {season_end_year})...")
+    # ESPN uses the season START year (2025 for 2025-26), not end year
+    season_year = int(CURRENT_SEASON.split("-")[0])
+    logger.info(f"ESPN stats fallback (season {season_year})...")
     all_rows = []
     page = 1
 
@@ -441,7 +442,7 @@ def _fetch_espn_stats() -> pd.DataFrame:
                 f"https://site.web.api.espn.com/apis/common/v3/sports/basketball/nba/statistics/byathlete"
                 f"?region=us&lang=en&contentorigin=espn&isqualified=true"
                 f"&sort=statistics.pts%3Adesc&limit=40&page={page}"
-                f"&season={season_end_year}&seasontype=2"
+                f"&season={season_year}&seasontype=2"
             )
             resp = requests.get(url, headers=ESPN_HEADERS, timeout=15)
             if resp.status_code == 404:
