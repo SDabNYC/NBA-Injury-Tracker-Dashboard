@@ -170,14 +170,16 @@ def compute_player_impact(
         return offensive, defensive, pie_norm, raw, ts_display
 
     if stats is None and display is None:
-        # Truly no data anywhere
+        # Truly no data — assign a very small default so unmatched bench/G-League
+        # players never outscore a matched star who happens to be Questionable.
+        # 0.02 × 1.0 (Out) = 0.02, which is well below any matched player's score.
         return PlayerImpact(
             player_name=injured.name, team_abbrev=injured.team_abbrev,
             status=injured.status, injury_type=injured.injury_type,
             injury_detail=injured.injury_detail,
             availability_weight=injured.availability_weight,
-            raw_impact_score=0.08,
-            weighted_impact_score=0.08 * injured.availability_weight,
+            raw_impact_score=0.02,
+            weighted_impact_score=0.02 * injured.availability_weight,
             found_in_stats=False,
         )
 

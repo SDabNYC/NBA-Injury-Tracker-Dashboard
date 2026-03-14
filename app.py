@@ -26,6 +26,9 @@ st.set_page_config(
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+# Show DEBUG logs for name matching — helps diagnose unmatched players
+logging.getLogger("data.player_stats").setLevel(logging.DEBUG)
+logging.getLogger("utils.name_normalizer").setLevel(logging.DEBUG)
 
 # ── Local imports (after page config) ────────────────────────────────────────
 from data.cache_manager import load_all_data

@@ -8,9 +8,11 @@ import unicodedata
 from typing import Optional
 from fuzzywuzzy import fuzz, process
 
-# ── Manual overrides: keys are lowercase, no punctuation ─────────────────────
+# ── Manual overrides ──────────────────────────────────────────────────────────
+# Keys: lowercase, no punctuation, no hyphens
+# Values: canonical form as it appears in NBA Stats API
 NAME_OVERRIDES = {
-    # Names the NBA API shortens or spells differently
+    # Generational suffixes
     "lebron james":               "LeBron James",
     "jaren jackson":              "Jaren Jackson Jr.",
     "jaren jackson jr":           "Jaren Jackson Jr.",
@@ -30,32 +32,72 @@ NAME_OVERRIDES = {
     "kenyon martin jr":           "Kenyon Martin Jr.",
     "robert williams":            "Robert Williams III",
     "robert williams iii":        "Robert Williams III",
-    "nicolas claxton":            "Nic Claxton",
-    "nic claxton":                "Nic Claxton",
-    "marcus morris sr":           "Marcus Morris Sr.",
-    "otto porter":                "Otto Porter Jr.",
-    "otto porter jr":             "Otto Porter Jr.",
-    # Suffixes sometimes omitted or varied
-    "dereck lively":              "Dereck Lively II",
-    "dereck lively ii":           "Dereck Lively II",
-    "jimmy butler":               "Jimmy Butler",   # no III in stats DB
-    "jimmy butler iii":           "Jimmy Butler",
-    "jaeseantate":                "Jae'Sean Tate",
-    "jaesean tate":               "Jae'Sean Tate",
     "scotty pippen":              "Scotty Pippen Jr.",
     "scotty pippen jr":           "Scotty Pippen Jr.",
     "walter clayton":             "Walter Clayton Jr.",
     "walter clayton jr":          "Walter Clayton Jr.",
-    "collin murray-boyles":       "Collin Murray-Boyles",
-    "kentavious caldwell-pope":   "Kentavious Caldwell-Pope",
+    "otto porter":                "Otto Porter Jr.",
+    "otto porter jr":             "Otto Porter Jr.",
+    "dereck lively":              "Dereck Lively II",
+    "dereck lively ii":           "Dereck Lively II",
+
+    # Internal capitals — capitalize() breaks these
+    "daron holmes":               "DaRon Holmes II",
+    "daron holmes ii":            "DaRon Holmes II",
+    "day ron sharpe":             "Day'Ron Sharpe",
+    "dayron sharpe":              "Day'Ron Sharpe",
+
+    # Initials
+    "kj simpson":                 "KJ Simpson",
+    "pj hall":                    "PJ Hall",
+    "pj washington":              "PJ Washington",
+    "aj green":                   "AJ Green",
+    "tj warren":                  "T.J. Warren",
+    "cj mccollum":                "CJ McCollum",
+    "cj mccollum":                "CJ McCollum",
+
+    # Aliases and short forms
+    "nicolas claxton":            "Nic Claxton",
+    "nic claxton":                "Nic Claxton",
+    "marcus morris sr":           "Marcus Morris Sr.",
+    "jimmy butler":               "Jimmy Butler",
+    "jimmy butler iii":           "Jimmy Butler",
+    "jaesean tate":               "Jae'Sean Tate",
+    "jaeseantate":                "Jae'Sean Tate",
+
+    # Accented names
+    "giannis antetokounmpo":      "Giannis Antetokounmpo",
+    "nikola jokic":               "Nikola Jokic",
+    "nikola jokic":               "Nikola Jokic",
+    "luka doncic":                "Luka Doncic",
+    "bojan bogdanovic":           "Bojan Bogdanovic",
+    "bogdan bogdanovic":          "Bogdan Bogdanovic",
+    "kristaps porzingis":         "Kristaps Porzingis",
+    "dario saric":                "Dario Saric",
+
+    # European names stored differently
+    "maxi kleber":                "Maxi Kleber",
+    "tidjane salaun":             "Tidjane Salaun",
     "santi aldama":               "Santi Aldama",
     "noa essengue":               "Noa Essengue",
     "moussa cisse":               "Moussa Cisse",
-    "johnny furphy":              "Johnny Furphy",
-    "chris youngblood":           "Chris Youngblood",
-    "chucky hepburn":             "Chucky Hepburn",
+    "egor demin":                 "Egor Demin",
+
+    # Traded players / name stored under different team
+    "terry rozier":               "Terry Rozier",
+    "terry rozier iii":           "Terry Rozier",
+
+    # Rookies and recent signings
     "zach edey":                  "Zach Edey",
+    "asa newell":                 "Asa Newell",
+    "kyshawn george":             "Kyshawn George",
+    "collin murray-boyles":       "Collin Murray-Boyles",
     "collin murrayboyles":        "Collin Murray-Boyles",
+    "kentavious caldwell-pope":   "Kentavious Caldwell-Pope",
+    "kentavious caldwellpope":    "Kentavious Caldwell-Pope",
+
+    # G League / two-way (no NBA stats — kept so lookup returns None quickly)
+    # Don't add these — let them fail naturally and get the 0.02 default
 }
 
 TEAM_NAME_MAP = {
@@ -92,133 +134,136 @@ def strip_accents(text: str) -> str:
 
 def _capitalize_part(part: str) -> str:
     """
-    Capitalize a single name part, handling:
-    - Hyphenated names: Caldwell-Pope, Murray-Boyles
-    - Apostrophe names: Jae'Sean, O'Neale
-    - Roman numeral suffixes: II, III, IV (kept uppercase)
-    - Jr./Sr. suffixes
-    - 2-letter initials: KJ, PJ, AJ, TJ, DJ (kept uppercase)
+    Capitalize a single name part correctly, handling:
+    - 2-letter initials: KJ, PJ → keep uppercase
+    - Roman numerals: II, III → keep uppercase
+    - Hyphenated names: Caldwell-Pope → capitalize each segment
+    - Apostrophe names: Jae'Sean → capitalize after apostrophe
+    - Jr./Sr. → capitalize with period
     """
     upper = part.upper().rstrip(".")
 
-    # Roman numerals and generational suffixes — keep uppercase
     if upper in ("II", "III", "IV", "V", "VI"):
         return upper
     if upper in ("JR", "SR"):
         return upper.capitalize() + "."
 
-    # 2-letter all-uppercase initials (KJ, PJ, AJ, TJ, DJ, CJ, etc.)
-    # Identified by: exactly 2 alpha chars, both uppercase in original
+    # 2-letter uppercase initials (KJ, PJ, AJ, etc.)
     if len(part) == 2 and part.isalpha() and part.isupper():
         return part.upper()
 
-    # Handle hyphenated names: capitalize each segment
     if "-" in part:
         return "-".join(_capitalize_part(seg) for seg in part.split("-"))
 
-    # Handle apostrophe names: capitalize after apostrophe too
     if "'" in part:
-        segments = part.split("'")
-        return "'".join(seg.capitalize() for seg in segments)
+        return "'".join(seg.capitalize() for seg in part.split("'"))
 
     return part.capitalize()
 
 
 def normalize_player_name(name: str) -> str:
     """
-    Normalize a player name to a canonical form suitable for matching.
-
-    Handles:
-    - Accented characters (Jokić → Jokic)
-    - Hyphenated surnames (caldwell-pope → Caldwell-Pope)
-    - Apostrophes (jae'sean → Jae'Sean)
-    - Roman numeral suffixes (ii → II, iii → III)
-    - Jr./Sr. suffixes
-    - Manual overrides for known mismatches
+    Normalize a player name for matching.
+    Strips accents, handles suffixes, applies overrides.
     """
     if not name:
         return ""
 
-    # Strip accents
     name = strip_accents(name.strip())
 
-    # Build a clean lookup key: lowercase, no dots, no apostrophes, no hyphens
+    # Build lookup key: lowercase, no punctuation
     key = name.lower()
-    key = re.sub(r"[.'`]", "", key)   # remove dots, apostrophes, backticks
+    key = re.sub(r"[.'`]", "", key)
     key = re.sub(r"\s+", " ", key).strip()
 
-    # Check override dict
     if key in NAME_OVERRIDES:
         return NAME_OVERRIDES[key]
 
-    # Also try without hyphens in key (catches "caldwell-pope" → lookup "caldwellpope")
     key_no_hyphen = key.replace("-", "")
     if key_no_hyphen in NAME_OVERRIDES:
         return NAME_OVERRIDES[key_no_hyphen]
 
-    # Capitalize each space-separated part
     parts = name.split()
     return " ".join(_capitalize_part(p) for p in parts)
 
 
-def fuzzy_match_player(name: str, candidates: list, threshold: int = 72) -> Optional[str]:
+def fuzzy_match_player(
+    name: str,
+    candidates: list,
+    threshold: int = 70,
+    log_failures: bool = False,
+) -> Optional[str]:
     """
     Fuzzy-match a player name against a list of known names.
-    Threshold lowered to 72 to handle suffix/apostrophe variations.
-    Uses token_sort_ratio which handles word-order differences.
+    Runs 3 passes with progressively looser matching:
+      Pass 1: full normalized name, threshold 70
+      Pass 2: suffix-stripped name, threshold 70
+      Pass 3: last-name-only match, threshold 85 (conservative)
     """
     if not candidates:
         return None
 
     normalized_input = normalize_player_name(name)
 
-    # Build map from normalized candidate → original candidate
+    # Build normalized candidate map
     norm_map = {}
     for c in candidates:
         nc = normalize_player_name(c)
         norm_map[nc] = c
 
-    # Try exact match first after normalization
+    # Pass 1: exact normalized match
     if normalized_input in norm_map:
         return norm_map[normalized_input]
 
-    # Fuzzy match
+    # Pass 1b: fuzzy full name
     result = process.extractOne(
-        normalized_input,
-        list(norm_map.keys()),
-        scorer=fuzz.token_sort_ratio,
+        normalized_input, list(norm_map.keys()), scorer=fuzz.token_sort_ratio
     )
-
     if result and result[1] >= threshold:
         return norm_map[result[0]]
 
-    # Second pass: strip suffixes (Jr., III etc.) and try again
-    # catches "Jimmy Butler III" vs "Jimmy Butler"
+    # Pass 2: strip suffixes (Jr., III, II etc.) from both sides
     stripped_input = re.sub(
         r"\s+(jr\.?|sr\.?|ii|iii|iv|v)$", "", normalized_input, flags=re.IGNORECASE
     ).strip()
 
     if stripped_input != normalized_input:
-        result2 = process.extractOne(
-            stripped_input,
-            list(norm_map.keys()),
-            scorer=fuzz.token_sort_ratio,
-        )
-        if result2 and result2[1] >= threshold:
-            return norm_map[result2[0]]
-
-        # Also try matching stripped input against stripped candidates
+        # Try against stripped candidates
         stripped_map = {
             re.sub(r"\s+(jr\.?|sr\.?|ii|iii|iv|v)$", "", k, flags=re.IGNORECASE).strip(): v
             for k, v in norm_map.items()
         }
-        result3 = process.extractOne(
-            stripped_input,
-            list(stripped_map.keys()),
-            scorer=fuzz.token_sort_ratio,
+        result2 = process.extractOne(
+            stripped_input, list(stripped_map.keys()), scorer=fuzz.token_sort_ratio
         )
-        if result3 and result3[1] >= threshold:
-            return stripped_map[result3[0]]
+        if result2 and result2[1] >= threshold:
+            return stripped_map[result2[0]]
+
+    # Pass 3: last-name-only match (high threshold to avoid false positives)
+    # e.g. "Giannis Antetokounmpo" last name is very distinctive
+    name_parts = normalized_input.split()
+    if len(name_parts) >= 2:
+        last_name = name_parts[-1]
+        if len(last_name) >= 5:  # only for long surnames to avoid "James" matching wrong
+            for candidate_norm, candidate_orig in norm_map.items():
+                cand_parts = candidate_norm.split()
+                if cand_parts and fuzz.ratio(last_name.lower(), cand_parts[-1].lower()) >= 90:
+                    # Verify first name also somewhat matches
+                    if len(name_parts) >= 1 and len(cand_parts) >= 1:
+                        first_match = fuzz.ratio(name_parts[0].lower(), cand_parts[0].lower())
+                        if first_match >= 60:
+                            return candidate_orig
+
+    if log_failures:
+        # Log top candidates to help debug
+        top = process.extract(
+            normalized_input, list(norm_map.keys()),
+            scorer=fuzz.token_sort_ratio, limit=3
+        )
+        import logging
+        logging.getLogger(__name__).debug(
+            f"No match for '{normalized_input}' — top candidates: {top}"
+        )
 
     return None
 

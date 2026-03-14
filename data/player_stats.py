@@ -203,11 +203,33 @@ def enrich_with_team_shares(
 
 
 def lookup_player(name: str, player_map: Dict[str, "PlayerStats"]) -> Optional["PlayerStats"]:
+    """
+    Look up a player by name. Logs close misses so you can add overrides.
+    """
     normalized = normalize_player_name(name)
     if normalized in player_map:
         return player_map[normalized]
-    matched = fuzzy_match_player(normalized, list(player_map.keys()))
-    return player_map[matched] if matched else None
+
+    matched = fuzzy_match_player(normalized, list(player_map.keys()), log_failures=True)
+    if matched:
+        # Log when fuzzy matching kicks in (useful to know)
+        if matched != normalized:
+            logger.debug(f"Fuzzy matched '{normalized}' → '{matched}'")
+        return player_map[matched]
+
+    # Log the failure with top candidates so you can add to NAME_OVERRIDES
+    try:
+        from fuzzywuzzy import fuzz, process as fz_process
+        top = fz_process.extract(normalized, list(player_map.keys()),
+                                  scorer=fuzz.token_sort_ratio, limit=3)
+        logger.debug(
+            f"No match for '{normalized}' — closest in DB: "
+            + ", ".join(f"'{n}' ({s}%)" for n, s, *_ in top)
+        )
+    except Exception:
+        pass
+
+    return None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
