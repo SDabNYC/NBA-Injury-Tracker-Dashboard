@@ -343,7 +343,7 @@ def _fetch_direct_http(last_n_games: int) -> pd.DataFrame:
                 time.sleep(RATE_LIMIT_DELAY * attempt)
             resp = requests.get(
                 "https://stats.nba.com/stats/leaguedashplayerstats",
-                params=base_params, headers=NBA_DIRECT_HEADERS, timeout=30,
+                params=base_params, headers=NBA_DIRECT_HEADERS, timeout=5,
             )
             logger.info(f"NBA Stats HTTP {resp.status_code} | URL: {resp.url[:120]}")
             resp.raise_for_status()
@@ -367,7 +367,7 @@ def _fetch_direct_http(last_n_games: int) -> pd.DataFrame:
                 adv_resp = requests.get(
                     "https://stats.nba.com/stats/leaguedashplayerstats",
                     params={**base_params, "MeasureType": "Advanced"},
-                    headers=NBA_DIRECT_HEADERS, timeout=30,
+                    headers=NBA_DIRECT_HEADERS, timeout=5,
                 )
                 adv_h, adv_r = _parse_nba_json(adv_resp.json())
                 if adv_r:
@@ -408,7 +408,7 @@ def _fetch_team_totals_direct(last_n_games: int) -> Dict[str, "TeamTotals"]:
                 time.sleep(RATE_LIMIT_DELAY * attempt)  # 0s, 0.6s, 1.2s
             resp = requests.get(
                 "https://stats.nba.com/stats/leaguedashteamstats",
-                params=params, headers=NBA_DIRECT_HEADERS, timeout=30,
+                params=params, headers=NBA_DIRECT_HEADERS, timeout=5,
             )
             resp.raise_for_status()
             data = resp.json()
