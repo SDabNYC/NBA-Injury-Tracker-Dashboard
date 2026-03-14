@@ -2,17 +2,12 @@
 Player and team stats fetcher — 2025-26 season.
 
 Key design: fetches TWO stat windows and merges them:
-  - Last 15 games  → used for active players (reflects current form)
-  - Full season    → used as fallback for players who haven't played recently
-                     (e.g. long-term injured players who are now listed on reports)
+  - Full season    → baseline, captures long-term injured players (Embiid etc.)
+  - Last 15 games  → overlay for active players, reflects current form
 
-This ensures players like Stephen Curry (out 20+ games) still appear in
-the stats DB so their impact can be properly assessed.
-
-Fetch chain per window:
-  1. nba_api library (correct v1.11.x params)
-  2. stats.nba.com direct HTTP (params dict, correct URL encoding)
-  3. ESPN internal stats API (full season only, no rolling window)
+Source: stats.nba.com direct HTTP only.
+nba_api is skipped entirely — it always fails with 'per_mode_simple'
+parameter errors in v1.11.x, wasting 5–10 seconds before falling back.
 """
 
 import time
@@ -28,7 +23,32 @@ from utils.name_normalizer import normalize_player_name, fuzzy_match_player
 
 logger = logging.getLogger(__name__)
 
-RATE_LIMIT_DELAY = 1.5
+RATE_LIMIT_DELAY = 0.6   # seconds — enough to avoid throttling, not slow
+
+
+def _current_nba_season() -> str:
+    today = date.today()
+    start_year = today.year if today.month >= 10 else today.year - 1
+    return f"{start_year}-{str(start_year + 1)[-2:]}"
+
+CURRENT_SEASON = _current_nba_season()
+LAST_N_GAMES   = 15
+
+NBA_DIRECT_HEADERS = {
+    "Host":               "stats.nba.com",
+    "User-Agent":         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Accept":             "application/json, text/plain, */*",
+    "Accept-Language":    "en-US,en;q=0.9",
+    "Accept-Encoding":    "gzip, deflate, br",
+    "x-nba-stats-origin": "stats",
+    "x-nba-stats-token":  "true",
+    "Referer":            "https://www.nba.com/",
+    "Origin":             "https://www.nba.com",
+    "Connection":         "keep-alive",
+    "Sec-Fetch-Dest":     "empty",
+    "Sec-Fetch-Mode":     "cors",
+    "Sec-Fetch-Site":     "same-site",
+}
 
 
 def _current_nba_season() -> str:
@@ -154,11 +174,6 @@ def get_all_team_totals(last_n_games: int = LAST_N_GAMES) -> Dict[str, "TeamTota
     """Fetch team per-game averages. Uses last_n_games for active teams."""
     logger.info(f"Fetching team totals — season: {CURRENT_SEASON}")
 
-    totals = _fetch_team_totals_nba_api(last_n_games)
-    if totals:
-        return totals
-
-    logger.warning("nba_api team totals failed — trying direct HTTP...")
     return _fetch_team_totals_direct(last_n_games)
 
 
@@ -196,101 +211,30 @@ def lookup_player(name: str, player_map: Dict[str, "PlayerStats"]) -> Optional["
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Stats window fetcher (tries nba_api → direct HTTP)
+# Stats window fetcher — direct HTTP only
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _fetch_stats_window(last_n: int, label: str) -> Dict[str, "PlayerStats"]:
-    """Fetch one stats window. Tries nba_api first, then direct HTTP."""
-
-    df = _fetch_via_nba_api(last_n)
-    if not df.empty:
-        logger.info(f"nba_api succeeded for '{label}': {len(df)} rows")
-        return _build_player_map(df, label)
-
+    """Fetch one stats window via direct HTTP. Falls back to ESPN if needed."""
     df = _fetch_direct_http(last_n)
     if not df.empty:
         logger.info(f"Direct HTTP succeeded for '{label}': {len(df)} rows")
         return _build_player_map(df, label)
 
-    logger.warning(f"Both sources failed for window '{label}'")
+    # ESPN fallback (full season only — no rolling window support)
+    if last_n == 0:
+        logger.warning(f"Direct HTTP failed for '{label}' — trying ESPN fallback...")
+        df = _fetch_espn_stats()
+        if not df.empty:
+            return _build_player_map(df, f"{label} (ESPN)")
+
+    logger.warning(f"All sources failed for window '{label}'")
     return {}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# nba_api (primary)
+# Direct HTTP — stats.nba.com (primary source)
 # ─────────────────────────────────────────────────────────────────────────────
-
-def _fetch_via_nba_api(last_n_games: int) -> pd.DataFrame:
-    try:
-        from nba_api.stats.endpoints import leaguedashplayerstats
-        time.sleep(RATE_LIMIT_DELAY)
-        logger.info(f"nba_api Base (LastNGames={last_n_games})...")
-
-        base_ep = leaguedashplayerstats.LeagueDashPlayerStats(
-            season=CURRENT_SEASON,
-            season_type_all_star="Regular Season",
-            last_n_games=last_n_games,
-            per_mode_simple="PerGame",
-            measure_type_simple="Base",
-            timeout=30,
-        )
-        base_df = base_ep.get_data_frames()[0]
-        if base_df.empty:
-            return pd.DataFrame()
-
-        # Advanced stats for USG_PCT and PIE
-        try:
-            time.sleep(RATE_LIMIT_DELAY)
-            adv_ep = leaguedashplayerstats.LeagueDashPlayerStats(
-                season=CURRENT_SEASON,
-                season_type_all_star="Regular Season",
-                last_n_games=last_n_games,
-                per_mode_simple="PerGame",
-                measure_type_simple="Advanced",
-                timeout=30,
-            )
-            adv_df = adv_ep.get_data_frames()[0]
-            if not adv_df.empty and "USG_PCT" in adv_df.columns:
-                slim = adv_df[["PLAYER_ID", "USG_PCT", "PIE"]].copy()
-                base_df = base_df.merge(slim, on="PLAYER_ID", how="left")
-        except Exception as e:
-            logger.debug(f"Advanced stats merge failed: {e}")
-
-        base_df["USG_PCT"] = base_df.get("USG_PCT", pd.Series(0.0, index=base_df.index)).fillna(0.0)
-        base_df["PIE"]     = base_df.get("PIE",     pd.Series(0.0, index=base_df.index)).fillna(0.0)
-        return base_df
-
-    except TypeError as e:
-        logger.warning(f"nba_api param error: {e}")
-        return pd.DataFrame()
-    except Exception as e:
-        logger.warning(f"nba_api failed: {e}")
-        return pd.DataFrame()
-
-
-def _fetch_team_totals_nba_api(last_n_games: int) -> Dict[str, "TeamTotals"]:
-    try:
-        from nba_api.stats.endpoints import leaguedashteamstats
-        time.sleep(RATE_LIMIT_DELAY)
-        ep = leaguedashteamstats.LeagueDashTeamStats(
-            season=CURRENT_SEASON,
-            season_type_all_star="Regular Season",
-            last_n_games=last_n_games,
-            per_mode_simple="PerGame",
-            measure_type_simple="Base",
-            timeout=30,
-        )
-        df = ep.get_data_frames()[0]
-        if df.empty:
-            return {}
-        return _df_to_team_totals(df)
-    except Exception as e:
-        logger.warning(f"nba_api team totals failed: {e}")
-        return {}
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Direct HTTP (fallback)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _fetch_direct_http(last_n_games: int) -> pd.DataFrame:
@@ -311,7 +255,8 @@ def _fetch_direct_http(last_n_games: int) -> pd.DataFrame:
 
     for attempt in range(3):
         try:
-            time.sleep(RATE_LIMIT_DELAY * (attempt + 1))
+            if attempt > 0:
+                time.sleep(RATE_LIMIT_DELAY * attempt)  # 0s, 0.6s, 1.2s
             resp = requests.get(
                 "https://stats.nba.com/stats/leaguedashplayerstats",
                 params=base_params, headers=NBA_DIRECT_HEADERS, timeout=30,
@@ -364,7 +309,8 @@ def _fetch_team_totals_direct(last_n_games: int) -> Dict[str, "TeamTotals"]:
     }
     for attempt in range(3):
         try:
-            time.sleep(RATE_LIMIT_DELAY * (attempt + 1))
+            if attempt > 0:
+                time.sleep(RATE_LIMIT_DELAY * attempt)  # 0s, 0.6s, 1.2s
             resp = requests.get(
                 "https://stats.nba.com/stats/leaguedashteamstats",
                 params=params, headers=NBA_DIRECT_HEADERS, timeout=30,
