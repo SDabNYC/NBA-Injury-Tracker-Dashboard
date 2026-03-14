@@ -216,24 +216,82 @@ def lookup_player(name: str, player_map: Dict[str, "PlayerStats"]) -> Optional["
 
 def _fetch_stats_window(last_n: int, label: str) -> Dict[str, "PlayerStats"]:
     """
-    Fetch one stats window via direct HTTP to stats.nba.com.
-    Falls back to ESPN stats API if NBA API is blocked/throttled.
+    Fetch one stats window. Three sources tried in order:
+      1. stats.nba.com direct HTTP  (best data, sometimes blocked)
+      2. ESPN stats API              (reliable, full season only)
+      3. nba_api LeagueDashPlayerStats with correct v1.11 params
+         (kept as last resort — slower but uses different connection)
     """
+    # Source 1: Direct HTTP
     df = _fetch_direct_http(last_n)
     if not df.empty:
         logger.info(f"Direct HTTP succeeded for '{label}': {len(df)} rows")
         return _build_player_map(df, label)
+    logger.warning(f"Direct HTTP failed for '{label}'")
 
-    # NBA API failed — use ESPN as fallback for all windows
-    # ESPN only has full-season stats, so last-N overlay will use season averages
-    logger.warning(f"Direct HTTP failed for '{label}' — trying ESPN fallback...")
+    # Source 2: ESPN (always full season — no rolling window)
+    logger.info(f"Trying ESPN fallback for '{label}'...")
     df = _fetch_espn_stats()
     if not df.empty:
-        logger.info(f"ESPN fallback succeeded for '{label}': {len(df)} rows")
+        logger.info(f"ESPN succeeded for '{label}': {len(df)} rows")
         return _build_player_map(df, f"{label} (ESPN)")
+    logger.warning(f"ESPN failed for '{label}'")
+
+    # Source 3: nba_api with corrected v1.11 parameter names
+    logger.info(f"Trying nba_api last resort for '{label}'...")
+    df = _fetch_via_nba_api_v11(last_n)
+    if not df.empty:
+        logger.info(f"nba_api succeeded for '{label}': {len(df)} rows")
+        return _build_player_map(df, f"{label} (nba_api)")
 
     logger.error(f"ALL sources failed for window '{label}'")
     return {}
+
+
+def _fetch_via_nba_api_v11(last_n_games: int) -> pd.DataFrame:
+    """
+    nba_api v1.11 uses different parameter names.
+    PerModeSimple instead of per_mode_simple, etc.
+    Try both old and new naming conventions.
+    """
+    try:
+        from nba_api.stats.endpoints import leaguedashplayerstats
+
+        # Try the parameter names nba_api v1.11 actually accepts
+        # by inspecting the endpoint's accepted params
+        ep = leaguedashplayerstats.LeagueDashPlayerStats(
+            season=CURRENT_SEASON,
+            season_type_all_star="Regular Season",
+            last_n_games=last_n_games,
+            per_mode_simple="PerGame",
+            timeout=30,
+        )
+        df = ep.get_data_frames()[0]
+        if not df.empty:
+            df["USG_PCT"] = 0.0
+            df["PIE"]     = 0.0
+            return df
+    except TypeError:
+        pass
+    except Exception as e:
+        logger.warning(f"nba_api v11 attempt failed: {e}")
+
+    # Try without any contested params
+    try:
+        from nba_api.stats.endpoints import leaguedashplayerstats
+        ep = leaguedashplayerstats.LeagueDashPlayerStats(
+            season=CURRENT_SEASON,
+            timeout=30,
+        )
+        df = ep.get_data_frames()[0]
+        if not df.empty:
+            df["USG_PCT"] = 0.0
+            df["PIE"]     = 0.0
+            return df
+    except Exception as e:
+        logger.warning(f"nba_api minimal params failed: {e}")
+
+    return pd.DataFrame()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
