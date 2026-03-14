@@ -171,9 +171,28 @@ def get_all_player_stats(last_n_games: int = LAST_N_GAMES) -> Dict[str, "PlayerS
 
 
 def get_all_team_totals(last_n_games: int = LAST_N_GAMES) -> Dict[str, "TeamTotals"]:
-    """Fetch team per-game averages. Uses last_n_games for active teams."""
+    """Fetch team per-game averages. Tries nba_api first, then direct HTTP."""
     logger.info(f"Fetching team totals — season: {CURRENT_SEASON}")
 
+    # Try nba_api first (works on Streamlit Cloud)
+    try:
+        from nba_api.stats.endpoints import leaguedashteamstats
+        ep = leaguedashteamstats.LeagueDashTeamStats(
+            season=CURRENT_SEASON,
+            season_type_all_star="Regular Season",
+            last_n_games=last_n_games,
+            timeout=30,
+        )
+        df = ep.get_data_frames()[0]
+        if not df.empty:
+            totals = _df_to_team_totals(df)
+            if totals:
+                logger.info(f"nba_api team totals: {len(totals)} teams")
+                return totals
+    except Exception as e:
+        logger.warning(f"nba_api team totals failed: {e}")
+
+    # Fallback: direct HTTP
     return _fetch_team_totals_direct(last_n_games)
 
 
@@ -238,33 +257,29 @@ def lookup_player(name: str, player_map: Dict[str, "PlayerStats"]) -> Optional["
 
 def _fetch_stats_window(last_n: int, label: str) -> Dict[str, "PlayerStats"]:
     """
-    Fetch one stats window. Three sources tried in order:
-      1. stats.nba.com direct HTTP  (best data, sometimes blocked)
-      2. ESPN stats API              (reliable, full season only)
-      3. nba_api LeagueDashPlayerStats with correct v1.11 params
-         (kept as last resort — slower but uses different connection)
+    Fetch one stats window. nba_api is tried FIRST since it's the most
+    reliable across all environments (local + Streamlit Cloud).
+    Direct HTTP is faster when it works but times out on Streamlit Cloud IPs.
     """
-    # Source 1: Direct HTTP
-    df = _fetch_direct_http(last_n)
-    if not df.empty:
-        logger.info(f"Direct HTTP succeeded for '{label}': {len(df)} rows")
-        return _build_player_map(df, label)
-    logger.warning(f"Direct HTTP failed for '{label}'")
-
-    # Source 2: ESPN (always full season — no rolling window)
-    logger.info(f"Trying ESPN fallback for '{label}'...")
-    df = _fetch_espn_stats()
-    if not df.empty:
-        logger.info(f"ESPN succeeded for '{label}': {len(df)} rows")
-        return _build_player_map(df, f"{label} (ESPN)")
-    logger.warning(f"ESPN failed for '{label}'")
-
-    # Source 3: nba_api with corrected v1.11 parameter names
-    logger.info(f"Trying nba_api last resort for '{label}'...")
+    # Source 1: nba_api (works everywhere, ~5s)
     df = _fetch_via_nba_api_v11(last_n)
     if not df.empty:
         logger.info(f"nba_api succeeded for '{label}': {len(df)} rows")
         return _build_player_map(df, f"{label} (nba_api)")
+
+    # Source 2: Direct HTTP (fast when not blocked, ~1s)
+    logger.warning(f"nba_api failed for '{label}' — trying direct HTTP...")
+    df = _fetch_direct_http(last_n)
+    if not df.empty:
+        logger.info(f"Direct HTTP succeeded for '{label}': {len(df)} rows")
+        return _build_player_map(df, label)
+
+    # Source 3: ESPN (full season only)
+    logger.warning(f"Direct HTTP failed for '{label}' — trying ESPN...")
+    df = _fetch_espn_stats()
+    if not df.empty:
+        logger.info(f"ESPN succeeded for '{label}': {len(df)} rows")
+        return _build_player_map(df, f"{label} (ESPN)")
 
     logger.error(f"ALL sources failed for window '{label}'")
     return {}
