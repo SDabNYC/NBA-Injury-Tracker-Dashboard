@@ -55,6 +55,11 @@ TEAM_NAME_MAP = {
     "New York Knicks": "NYK", "Orlando Magic": "ORL",
     "Phoenix Suns": "PHX", "Sacramento Kings": "SAC",
     "Toronto Raptors": "TOR", "Utah Jazz": "UTA",
+    # Short forms the NBA PDF actually uses
+    "LA Clippers": "LAC", "LA Lakers": "LAL",
+    "Golden State": "GSW", "Oklahoma City": "OKC",
+    "New Orleans": "NOP", "San Antonio": "SAS",
+    "New York": "NYK", "Portland": "POR",
 }
 KNOWN_ABBREVS = set(TEAM_NAME_MAP.values())
 
